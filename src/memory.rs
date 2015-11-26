@@ -45,18 +45,17 @@ fn ceil_log2(n: usize) -> usize {
     n
 }
 
-
 #[derive(Clone, Copy)]
 /// The state of a memory block
 pub enum MemoryState {
     /// None
-    None,
+    None = 4,
     /// Free
-    Free,
+    Free = 1,
     /// Used
-    Used,
+    Used = 2,
     /// Splitted
-    Split,
+    Split = 3,
 }
 
 impl MemoryState {
@@ -75,14 +74,14 @@ impl MemoryState {
 /// The memory tree
 pub struct StateArray {
     /// The ptr to byte buffer of the state array
-    bytes: [u8; MT_BYTES],
+    bytes: [u8; MT_BYTES], // bytes: [u8; MT_BYTES],
 }
 
 impl StateArray {
     /// Get the nth memory state (where n is a path in the tree)
     pub unsafe fn get(&self, n: usize) -> MemoryState {
         let byte = n / 4;
-        let bit = n % 8;
+        let bit = 6 - 2 * (n % 4); // (from right)
 
         MemoryState::from_u8((self.bytes[byte] >> bit) & 3)
     }
@@ -90,15 +89,15 @@ impl StateArray {
     /// Set the nth memory state (where n is a path in the tree)
     pub unsafe fn set(&mut self, n: usize, val: MemoryState) {
         let byte = n / 4;
-        let bit = n % 8;
+        let bit = 6 - 2 * (n % 4); // (from right)
 
-        println!("Set() called");
-        println!("bit:  {}", bit);
-        println!("byte: {}", byte);
+        //let ptr = (self.ptr + byte) as *mut u8;
+        let b = self.bytes[byte];
 
-        self.bytes[byte] = ((val as u8) << bit) ^ (!(3 << 6) >> bit) & self.bytes[byte]; //(self.bytes[byte] & !((3 << 6) >> bit)) ^ ((val as u8) << (8 - bit));
+        self.bytes[byte] = ((val as u8) << bit) ^ (!(3 << bit) & b);
     }
 }
+
 
 // #[derive(Clone, Copy)]
 pub struct StateTree {
@@ -146,13 +145,14 @@ pub struct Block {
 impl Block {
     /// Get the position of this block
     pub fn pos(&self) -> usize {
-        println!("Pos() called: ");
+        /*println!("Pos() called: ");
         println!("Level: {}", self.level);
         println!("Idx:   {}", self.idx);
+        */
 
         let res = self.idx + (1 << self.level) - 1; //(1 + self.idx - (MT_LEAFS >> self.level)) << self.level;
 
-        println!("Res:   {}", res);
+        //println!("Res:   {}", res);
         res
     }
 
@@ -227,10 +227,10 @@ impl MemoryTree {
     /// Split a block
     pub unsafe fn split(&mut self, block: Block) -> Block {
         self.tree.set(block, MemoryState::Split);
-        self.tree.set(Block {
-            idx: block.idx * 2 + 1,
-            level: block.level + 1,
-        }, MemoryState::Free);
+//        self.tree.set(Block {
+//            idx: block.idx * 2 + 1,
+//            level: block.level + 1,
+//        }, MemoryState::Free);
 
         let res = Block {
             idx: block.idx * 2,
@@ -245,7 +245,7 @@ impl MemoryTree {
     pub unsafe fn alloc(&mut self, mut size: usize) -> Option<Block> {
         println!("Ideal block level: {}", size / MT_ATOM + 1);
 
-        let level = MT_DEPTH - ceil_log2(size / MT_ATOM + 1) - 1;
+        let level = MT_DEPTH - ceil_log2(size / MT_ATOM) - 1;
 
         println!("Allocating block of level, {}", level);
 
@@ -266,6 +266,7 @@ impl MemoryTree {
         println!("Best fit search done");
 
         if let Some(n) = free {
+            println!("Free block");
             self.tree.set(Block {
                               level: level,
                               idx: n,
@@ -277,6 +278,7 @@ impl MemoryTree {
                 level: level,
             })
         } else {
+            println!("Seaching for a block to split...");
             if level == 0 {
                 println!("Returning none since no block is available for splitting (you cannot allocate block larger than root block)");
                 None
