@@ -21,7 +21,7 @@ pub const MT_BYTES: usize = MT_NODES / 4;
 /// Empty memory tree
 static mut MT: MemoryTree = MemoryTree {
     tree: StateTree { arr: StateArray {
-        bytes: [0; MT_BYTES],
+        bytes: [0; MT_NODES],
     } },
 };
 
@@ -32,39 +32,41 @@ static mut HEAP: [u8; HEAP_SIZE] = [0; HEAP_SIZE];
 
 static mut HEAP_START: usize = 0;
 
-
 /// Ceil log 2
+#[inline]
 fn ceil_log2(n: usize) -> usize {
-    let mut res = 0;
-    let mut n = 0;
-    while res > 0 {
-        n += 1;
-        res >>= 1;
+    if n == 0 {
+        0
+    } else {
+        floor_log2(n - 1) + 1
     }
+}
 
-    n
+#[inline]
+fn floor_log2(n: usize) -> usize {
+    mem::size_of::<usize>() * 8 - n.leading_zeros() as usize
 }
 
 #[derive(Clone, Copy)]
 /// The state of a memory block
 pub enum MemoryState {
     /// None
-    None = 4,
+    None = 3,
     /// Free
-    Free = 1,
+    Free = 0,
     /// Used
-    Used = 2,
+    Used = 1,
     /// Splitted
-    Split = 3,
+    Split = 2,
 }
 
 impl MemoryState {
     /// Convert an u8 to MemoryState
     pub fn from_u8(n: u8) -> MemoryState {
         match n {
-            1 => MemoryState::Free,
-            2 => MemoryState::Used,
-            3 => MemoryState::Split,
+            0 => MemoryState::Free,
+            1 => MemoryState::Used,
+            2 => MemoryState::Split,
             _ => MemoryState::None,
         }
     }
@@ -74,27 +76,18 @@ impl MemoryState {
 /// The memory tree
 pub struct StateArray {
     /// The ptr to byte buffer of the state array
-    bytes: [u8; MT_BYTES], // bytes: [u8; MT_BYTES],
+    bytes: [u8; MT_NODES], // bytes: [u8; MT_BYTES],
 }
 
 impl StateArray {
     /// Get the nth memory state (where n is a path in the tree)
     pub unsafe fn get(&self, n: usize) -> MemoryState {
-        let byte = n / 4;
-        let bit = 6 - 2 * (n % 4); // (from right)
-
-        MemoryState::from_u8((self.bytes[byte] >> bit) & 3)
+        MemoryState::from_u8(self.bytes[n])
     }
 
     /// Set the nth memory state (where n is a path in the tree)
     pub unsafe fn set(&mut self, n: usize, val: MemoryState) {
-        let byte = n / 4;
-        let bit = 6 - 2 * (n % 4); // (from right)
-
-        //let ptr = (self.ptr + byte) as *mut u8;
-        let b = self.bytes[byte];
-
-        self.bytes[byte] = ((val as u8) << bit) ^ (!(3 << bit) & b);
+        self.bytes[n] = val as u8;
     }
 }
 
@@ -145,15 +138,7 @@ pub struct Block {
 impl Block {
     /// Get the position of this block
     pub fn pos(&self) -> usize {
-        /*println!("Pos() called: ");
-        println!("Level: {}", self.level);
-        println!("Idx:   {}", self.idx);
-        */
-
-        let res = self.idx + (1 << self.level) - 1; //(1 + self.idx - (MT_LEAFS >> self.level)) << self.level;
-
-        //println!("Res:   {}", res);
-        res
+        self.idx + (1 << self.level) - 1
     }
 
     /// Get sibling side
@@ -172,39 +157,35 @@ impl Block {
         }
     }
 
-    /// The parrent of this block
+    /// The parrent of this block (remember to make sure you do not take this on the root block!
+    /// (else you'll get arithmetic overflow)
     pub fn parrent(&self) -> Block {
         Block {
             idx: self.idx / 2,
-            level: if self.level == 0 {
-                self.level
-            } else {
-                self.level - 1
-            },
+            level: self.level - 1,
         }
     }
 
     /// The size of this block
     pub fn size(&self) -> usize {
-        MT_ROOT / (1 << self.level)
+        unsafe {
+            MT_ROOT / (1 << self.level)
+        }
     }
 
     /// Convert a pointer to a block
     pub fn from_ptr(ptr: usize) -> Block {
-        // 47b4bbc7da718f45f89ce13d26a05ba89aa35510
-        let pos = unsafe {
-            (ptr - HEAP_START) / MT_ATOM
-        };
-        let level = ceil_log2(pos);
+        unsafe {
+            let pos = (ptr - HEAP_START) / MT_ATOM;
+            let level = floor_log2(pos);
 
-        println!("From_ptr() called");
-        println!("Level: {}", level);
+            let idx = (pos + 1) >> level;
 
-        let idx = (pos + 1) >> level; //(1 << MT_DEPTH) - 1) >> level;
 
-        Block {
-            level: level,
-            idx: idx,
+            Block {
+                level: level,
+                idx: idx,
+            }
         }
     }
 
@@ -245,7 +226,11 @@ impl MemoryTree {
     pub unsafe fn alloc(&mut self, mut size: usize) -> Option<Block> {
         println!("Ideal block level: {}", size / MT_ATOM + 1);
 
-        let level = MT_DEPTH - ceil_log2(size / MT_ATOM) - 1;
+        if size >= MT_ROOT {
+            return None;
+        }
+
+        let level = MT_DEPTH - ceil_log2(size / MT_ATOM);
 
         println!("Allocating block of level, {}", level);
 
@@ -253,7 +238,7 @@ impl MemoryTree {
         //let level = order;
 
         let mut free = None;
-        for i in 0..2 * (1 << level) {
+        for i in 0..1 << level {
             println!("i: {}", i);
             if let MemoryState::Free = self.tree.get(Block {
                 level: level,
@@ -297,6 +282,10 @@ impl MemoryTree {
 
     /// Reallocate a block in an optimal way (by unifing it with its buddy)
     pub unsafe fn realloc(&mut self, mut block: Block, mut size: usize) -> Option<Block> {
+        if size >= MT_ROOT {
+            return None;
+        }
+
         if let Sibling::Left = block.sibl() {
             let mut level = 0;
 
@@ -312,7 +301,7 @@ impl MemoryTree {
                 }
 
                 Some(self.split(block))
-            } else {
+            } else if block.level != 0 {
                 let mut buddy = block.get_buddy();
 
                 for i in 1..delta {
@@ -333,6 +322,8 @@ impl MemoryTree {
                     None
                 }
 
+            } else {
+                None
             }
         } else {
             None
@@ -343,8 +334,10 @@ impl MemoryTree {
     /// Deallocate a block
     pub unsafe fn dealloc(&mut self, block: Block) {
         self.tree.set(block, MemoryState::Free);
-        if let MemoryState::Free = self.tree.get(block.get_buddy()) {
-            self.dealloc(block.parrent());
+        if block.level != 0 {
+            if let MemoryState::Free = self.tree.get(block.get_buddy()) {
+                self.dealloc(block.parrent());
+            }
         }
     }
 
@@ -362,6 +355,10 @@ pub fn memory_init() {
 
 /// Allocate memory
 pub unsafe fn alloc(size: usize) -> usize {
+    if size > MT_ROOT {
+        return 0;
+    }
+
     let ret;
 
     // Memory allocation must be atomic
@@ -492,6 +489,10 @@ pub unsafe fn unalloc(ptr: usize) {
 
 /// Reallocate
 pub unsafe fn realloc(ptr: usize, size: usize) -> usize {
+    if size > MT_ROOT {
+        return 0;
+    }
+
     let ret;
 
     // Memory allocation must be atomic
